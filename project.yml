@@ -1,0 +1,155 @@
+# docker image build
+---
+- hosts: localhost
+  tasks:
+  - name: Create docker images using war artifactory
+    command: docker build -t webapplication:latest .
+    args:
+      chdir: /root/data
+
+  - name: create tag to image
+    command: docker tag webapplication sasigowda152/besant9am:webapplication
+
+  - name: push image to docker hub
+    command: docker push sasigowda152/besant9am:webapplication
+
+  - name: remove docker image from docker server server post image push
+    command: docker rmi webapplication:latest sasigowda152/besant9am:webapplication
+    ignore_errors: yes
+
+# Docker file for build
+
+FROM alpine:3.12
+LABEL AUTHOR="Sasi"
+LABEL APPLICATION="Java Application"
+RUN apk add openjdk8-jre
+WORKDIR /opt
+# download tomcat from internet
+ADD https://dlcdn.apache.org/tomcat/tomcat-8/v8.5.84/bin/apache-tomcat-8.5.84.tar.gz .
+# untar tomcat
+RUN tar xf apache-tomcat-8.5.84.tar.gz
+RUN mv apache-tomcat-8.5.84 tomcat8
+COPY ./addressbook.war /opt/tomcat8/webapps/
+EXPOSE 8080
+ENTRYPOINT ["./tomcat8/bin/catalina.sh", "run"]
+
+# docker deploy
+---
+- hosts: 172.31.25.150
+  tasks:
+  - name: stop if we have old docker container
+    command: docker stop simple-devops-container
+    ignore_errors: yes
+
+  - name: remove stopped docker container
+    command: docker rm simple-devops-container
+    ignore_errors: yes
+
+  - name: remove current docker image
+    command: docker rmi sasigowda152/besant9am:webapplication
+    ignore_errors: yes
+
+  - name: creating docker container
+    command: docker run -d --name simple-devops-container -p 8080:8080 sasigowda152/besant9am:webapplication
+
+
+
+#    register: result
+#    failed_when:
+#      - result.rc == 0
+#      - '"docker" not in result.stdout'
+# kubernetes deploy
+
+---
+- hosts: 172.31.17.244
+  tasks:
+    - name: deploy app into k8s
+      command: "kubectl apply -f deployment.yml"
+      args:
+        chdir: /root/
+
+    - name: run service file
+      command: "kubectl apply -f service.yml"
+      args:
+        chdir: /root/
+
+# deployment and service have to present in k8s server to do deployment
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-deployment
+  labels:
+    name: myapp
+    env: prod
+spec:
+  selector:
+    matchLabels:
+      env: prod
+  replicas: 3
+  template:
+    metadata:
+      name: webapp
+      labels:
+        env: prod
+    spec:
+      containers:
+        - name: webapp
+          image: sasigowda152/besant9am:webapplication
+          ports:
+            - containerPort: 8080
+
+
+# service file
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-port
+spec:
+  type: NodePort
+  ports:
+    - targetPort: 8080
+      port: 8080
+      nodePort: 30004
+  selector:
+    env: prod
+
+
+
+# finaly tomcat deployment
+---
+- hosts: 172.31.31.210
+  tasks:
+    - name: deploy into tomcat server
+      copy:
+        src: /root/data/addressbook.war
+        dest: /opt/tomcat8/webapps
+
+
+# Same project we can do on pipeline
+
+pipeline{
+    agent any
+    options { skipDefaultCheckout() }
+    environment{
+        PATH ="/opt/maven/bin:$PATH"
+    }
+    stages{
+        stage("git check"){
+            steps{
+                git credentialsId: 'git_id', url: 'https://github.com/sasigowda/addressbook.git'
+            }           
+        }
+        stage("maven build"){
+            steps{
+                sh "mvn clean package"
+            }
+        }
+        stage("sharing artifactory to docker server"){
+            steps{
+                sshPublisher(publishers: [sshPublisherDesc(configName: 'ansible', transfers: [sshTransfer(cleanRemote: false, excludes: '', execCommand: 'cd /root;mv addressbook-2.0.war addressbook.war;ansible-playbook dockerimagebuild.yml;ansible-playbook deployintodocker.yml;ansible-playbook k8sdeploy.yml;ansible-playbook tomcatdeploy.yaml', execTimeout: 120000, flatten: false, makeEmptyDirs: false, noDefaultExcludes: false, patternSeparator: '[, ]+', remoteDirectory: '', remoteDirectorySDF: false, removePrefix: 'target/', sourceFiles: 'target/*.war')], usePromotionTimestamp: false, useWorkspaceInPromotion: false, verbose: false)])
+                  }
+        }
+    }
+}
